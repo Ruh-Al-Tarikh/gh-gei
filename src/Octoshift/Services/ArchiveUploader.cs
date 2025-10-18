@@ -4,7 +4,6 @@ using System.IO;
 using System.Linq;
 using System.Net.Http;
 using System.Threading.Tasks;
-using System.Web;
 using Newtonsoft.Json.Linq;
 using OctoshiftCLI.Extensions;
 
@@ -13,15 +12,17 @@ namespace OctoshiftCLI.Services;
 public class ArchiveUploader
 {
     private readonly GithubClient _client;
+    private readonly string _uploadsUrl;
     private readonly OctoLogger _log;
     internal int _streamSizeLimit = 100 * 1024 * 1024; // 100 MiB
+    private readonly RetryPolicy _retryPolicy;
 
-    private const string BASE_URL = "https://uploads.github.com";
-
-    public ArchiveUploader(GithubClient client, OctoLogger log)
+    public ArchiveUploader(GithubClient client, string uploadsUrl, OctoLogger log, RetryPolicy retryPolicy)
     {
         _client = client;
+        _uploadsUrl = uploadsUrl;
         _log = log;
+        _retryPolicy = retryPolicy;
     }
     public virtual async Task<string> Upload(Stream archiveContent, string archiveName, string orgDatabaseId)
     {
@@ -39,16 +40,16 @@ public class ArchiveUploader
 
         if (isMultipart)
         {
-            var url = $"{BASE_URL}/organizations/{orgDatabaseId.EscapeDataString()}/gei/archive/blobs/uploads";
+            var url = $"{_uploadsUrl}/organizations/{orgDatabaseId.EscapeDataString()}/gei/archive/blobs/uploads";
 
             response = await UploadMultipart(archiveContent, archiveName, url);
             return response;
         }
         else
         {
-            var url = $"{BASE_URL}/organizations/{orgDatabaseId.EscapeDataString()}/gei/archive?name={archiveName.EscapeDataString()}";
+            var url = $"{_uploadsUrl}/organizations/{orgDatabaseId.EscapeDataString()}/gei/archive?name={archiveName.EscapeDataString()}";
 
-            response = await _client.PostAsync(url, streamContent);
+            response = await _retryPolicy.Retry(async () => await _client.PostAsync(url, streamContent));
             var data = JObject.Parse(response);
             return (string)data["uri"];
         }
@@ -62,10 +63,7 @@ public class ArchiveUploader
         {
             // 1. Start the upload
             var startHeaders = await StartUpload(uploadUrl, archiveName, archiveContent.Length);
-
             var nextUrl = GetNextUrl(startHeaders);
-
-            var guid = HttpUtility.ParseQueryString(nextUrl.Query)["guid"];
 
             // 2. Upload parts
             int bytesRead;
@@ -78,9 +76,9 @@ public class ArchiveUploader
             }
 
             // 3. Complete the upload
-            await CompleteUpload(nextUrl.ToString());
+            var geiUri = await CompleteUpload(nextUrl.ToString());
 
-            return $"gei://archive/{guid}";
+            return geiUri.ToString();
         }
         catch (Exception ex)
         {
@@ -101,7 +99,7 @@ public class ArchiveUploader
 
         try
         {
-            var (responseContent, headers) = await _client.PostWithFullResponseAsync(uploadUrl, body);
+            var (_, headers) = await _retryPolicy.Retry(async () => await _client.PostWithFullResponseAsync(uploadUrl, body));
             return headers.ToList();
         }
         catch (Exception ex)
@@ -119,7 +117,7 @@ public class ArchiveUploader
         try
         {
             // Make the PATCH request and retrieve headers
-            var (_, headers) = await _client.PatchWithFullResponseAsync(nextUrl, content);
+            var (_, headers) = await _retryPolicy.Retry(async () => await _client.PatchWithFullResponseAsync(nextUrl, content));
 
             // Retrieve the next URL from the response headers
             return GetNextUrl(headers.ToList());
@@ -130,12 +128,16 @@ public class ArchiveUploader
         }
     }
 
-    private async Task CompleteUpload(string lastUrl)
+    private async Task<Uri> CompleteUpload(string lastUrl)
     {
         try
         {
-            await _client.PutAsync(lastUrl, "");
+            var response = await _retryPolicy.Retry(async () => await _client.PutAsync(lastUrl, ""));
+            var responseData = JObject.Parse(response);
+
             _log.LogInformation("Finished uploading archive");
+
+            return new Uri((string)responseData["uri"]);
         }
         catch (Exception ex)
         {
@@ -153,7 +155,7 @@ public class ArchiveUploader
             var locationValue = locationHeader.Value.FirstOrDefault();
             if (locationValue.HasValue())
             {
-                return new Uri(new Uri(BASE_URL), locationValue);
+                return new Uri(new Uri(_uploadsUrl), locationValue);
             }
         }
         throw new OctoshiftCliException("Location header is missing in the response, unable to retrieve next URL for multipart upload.");

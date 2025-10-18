@@ -1,1 +1,0 @@
-- `gh gei migrate-repo` logs the git and metadata archive download paths when `--keep-archive` is used.
