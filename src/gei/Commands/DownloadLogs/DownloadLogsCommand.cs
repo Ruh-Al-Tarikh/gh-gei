@@ -6,7 +6,7 @@ using OctoshiftCLI.Commands.DownloadLogs;
 
 namespace OctoshiftCLI.GithubEnterpriseImporter.Commands.DownloadLogs;
 
-public class DownloadLogsCommand : DownloadLogsCommandBase
+public sealed class DownloadLogsCommand : DownloadLogsCommandBase
 {
     public DownloadLogsCommand() : base() => AddOptions();
 
@@ -22,13 +22,11 @@ public class DownloadLogsCommand : DownloadLogsCommandBase
 
     public override Option<string> GithubRepo { get; } = new("--target-repo")
     {
-        IsRequired = true,
         Description = "Target repository to download latest log for."
     };
 
     public override Option<string> GithubOrg { get; } = new("--github-target-org")
     {
-        IsRequired = true,
         Description = "Target GitHub organization to download logs from."
     };
 }
